@@ -23,3 +23,50 @@ spec:
         sliceType: "URLLC"
         latency: "ultra-low"     # 轉譯器對應：5QI=85
         resourceShare: "Full"    # 轉譯器對應：maxPrb=100, priority=200
+
+# ============================================================================
+# Status 說明 (由 E2E Orchestrator 自動填寫，符合 3GPP TS 28.312 閉環控制)
+# ============================================================================
+# status:
+#   phase: Applied
+#   fulfillmentState: FULFILLED          # 3GPP: 整體意圖履行狀態
+#   observedGeneration: 1
+#   lastReconcileTime: "2026-03-31T13:00:00Z"
+#   conditions:
+#     - type: Ready
+#       status: "True"
+#       reason: AllIntentsApplied
+#   intentGroupStatuses:
+#     - id: "embb"
+#       phase: Applied
+#       fulfillmentState: FULFILLED      # 3GPP: 此意圖群組的履行狀態
+#       message: "Intent successfully translated and applied to RAN domain"
+#       translatedParams:
+#         coreParams:
+#           qfi: 6
+#           fiveQI: 6
+#         ranParams:
+#           sst: 1
+#           sd: 66051
+#           minPrbPolicyRatio: 0
+#           maxPrbPolicyRatio: 50
+#           priority: 10
+#       achievedTargets:                 # 3GPP: 目標達成狀態
+#         bandwidth: achieved
+#         latency: not_applicable
+#         resourceShare: achieved
+#       domainStatus:                    # 各域履行狀態
+#         coreDomain:
+#           state: SKIPPED
+#           message: "UEs already registered manually"
+#         ranDomain:
+#           state: CONFIGURED
+#           message: "Slice configured: SST=1, SD=66051, maxPRB=50"
+#     - id: "urllc"
+#       phase: Applied
+#       fulfillmentState: FULFILLED
+#       achievedTargets:
+#         latency: achieved
+#         bandwidth: not_applicable
+#         resourceShare: achieved
+

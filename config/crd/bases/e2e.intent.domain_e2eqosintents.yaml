@@ -20,6 +20,9 @@ spec:
     - jsonPath: .status.phase
       name: Phase
       type: string
+    - jsonPath: .status.fulfillmentState
+      name: Fulfillment
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -30,6 +33,7 @@ spec:
           E2EQoSIntent is the Schema for the E2E QoS Intent CRD.
           It allows rApps to declare high-level E2E network slice intents that the
           orchestrator translates into domain-specific configurations.
+          Aligned with 3GPP TS 28.312 Intent-driven Management framework.
         properties:
           apiVersion:
             description: |-
@@ -126,7 +130,9 @@ spec:
             - intentGroups
             type: object
           status:
-            description: E2EQoSIntentStatus defines the observed state of E2EQoSIntent.
+            description: |-
+              E2EQoSIntentStatus defines the observed state of E2EQoSIntent.
+              Aligned with 3GPP TS 28.312 Intent-driven Management closed-loop concepts.
             properties:
               conditions:
                 description: Conditions represent the latest available observations
@@ -186,13 +192,116 @@ spec:
                   - type
                   type: object
                 type: array
+              fulfillmentState:
+                description: FulfillmentState indicates the overall intent fulfillment
+                  state per 3GPP TS 28.312.
+                enum:
+                - NOT_FULFILLED
+                - PARTIALLY_FULFILLED
+                - FULFILLED
+                - DEGRADED
+                type: string
               intentGroupStatuses:
                 description: IntentGroupStatuses contains the status of each intent
                   group.
                 items:
-                  description: IntentGroupStatus represents the status of a single
-                    intent group.
+                  description: |-
+                    IntentGroupStatus represents the status of a single intent group.
+                    Aligned with 3GPP TS 28.312 Intent Fulfillment concepts.
                   properties:
+                    achievedTargets:
+                      description: AchievedTargets reports whether each expected target
+                        has been achieved.
+                      properties:
+                        bandwidth:
+                          description: Bandwidth indicates if the bandwidth target
+                            was achieved.
+                          enum:
+                          - achieved
+                          - not_achieved
+                          - not_applicable
+                          type: string
+                        latency:
+                          description: Latency indicates if the latency target was
+                            achieved.
+                          enum:
+                          - achieved
+                          - not_achieved
+                          - not_applicable
+                          type: string
+                        resourceShare:
+                          description: ResourceShare indicates if the resource share
+                            allocation was applied.
+                          enum:
+                          - achieved
+                          - not_achieved
+                          - not_applicable
+                          type: string
+                      type: object
+                    domainStatus:
+                      description: DomainStatus contains the fulfillment status of
+                        each domain (Core/RAN).
+                      properties:
+                        coreDomain:
+                          description: CoreDomain indicates the fulfillment status
+                            of the Core (5GC) domain.
+                          properties:
+                            lastUpdated:
+                              description: LastUpdated indicates when this domain
+                                was last updated.
+                              format: date-time
+                              type: string
+                            message:
+                              description: Message provides additional information
+                                about the domain status.
+                              type: string
+                            state:
+                              description: State indicates the current state of this
+                                domain.
+                              enum:
+                              - CONFIGURED
+                              - PENDING
+                              - FAILED
+                              - SKIPPED
+                              type: string
+                          required:
+                          - state
+                          type: object
+                        ranDomain:
+                          description: RANDomain indicates the fulfillment status
+                            of the RAN domain.
+                          properties:
+                            lastUpdated:
+                              description: LastUpdated indicates when this domain
+                                was last updated.
+                              format: date-time
+                              type: string
+                            message:
+                              description: Message provides additional information
+                                about the domain status.
+                              type: string
+                            state:
+                              description: State indicates the current state of this
+                                domain.
+                              enum:
+                              - CONFIGURED
+                              - PENDING
+                              - FAILED
+                              - SKIPPED
+                              type: string
+                          required:
+                          - state
+                          type: object
+                      type: object
+                    fulfillmentState:
+                      description: FulfillmentState indicates whether the intent has
+                        been fulfilled per 3GPP TS 28.312.
+                      enum:
+                      - NOT_FULFILLED
+                      - PARTIALLY_FULFILLED
+                      - FULFILLED
+                      - DEGRADED
+                      type: string
                     id:
                       description: ID is the intent group identifier.
                       type: string
@@ -269,6 +378,12 @@ spec:
                 description: LastReconcileTime is the timestamp of the last reconciliation.
                 format: date-time
                 type: string
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the generation of the spec that was last processed.
+                  Used to detect spec changes and trigger re-reconciliation.
+                format: int64
+                type: integer
               phase:
                 description: Phase indicates the overall phase of the E2EQoSIntent.
                 enum:

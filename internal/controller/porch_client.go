@@ -52,40 +52,20 @@ type SliceConfig struct {
 	Priority          uint32
 }
 
-// SrsRANCellConfigYAML represents the YAML structure of SrsRANCellConfig for mutation.
-type SrsRANCellConfigYAML struct {
-	APIVersion string                   `yaml:"apiVersion"`
-	Kind       string                   `yaml:"kind"`
-	Metadata   map[string]interface{}   `yaml:"metadata"`
-	Spec       SrsRANCellConfigSpecYAML `yaml:"spec"`
-}
-
-// SrsRANCellConfigSpecYAML represents the spec section of SrsRANCellConfig.
-type SrsRANCellConfigSpecYAML struct {
-	DlArfcn             uint32                 `yaml:"dlArfcn,omitempty"`
-	Band                uint32                 `yaml:"band,omitempty"`
-	ChannelBandwidthMHz uint32                 `yaml:"channelBandwidthMHz,omitempty"`
-	CommonScs           uint32                 `yaml:"commonScs,omitempty"`
-	PCI                 uint32                 `yaml:"pci,omitempty"`
-	PDCCH               map[string]interface{} `yaml:"pdcch,omitempty"`
-	PRACH               map[string]interface{} `yaml:"prach,omitempty"`
-	PDSCHMcsTable       string                 `yaml:"pdschMcsTable,omitempty"`
-	PUSCHMcsTable       string                 `yaml:"puschMcsTable,omitempty"`
-	Slicing             []SliceConfigYAML      `yaml:"slicing,omitempty"`
-}
-
-// SliceConfigYAML represents a slice configuration in YAML format.
-type SliceConfigYAML struct {
-	SST      uint32       `yaml:"sst"`
-	SD       uint32       `yaml:"sd"`
-	SchedCfg SchedCfgYAML `yaml:"schedCfg"`
-}
-
-// SchedCfgYAML represents scheduler configuration for a slice.
-type SchedCfgYAML struct {
-	MinPrbPolicyRatio uint32 `yaml:"minPrbPolicyRatio"`
-	MaxPrbPolicyRatio uint32 `yaml:"maxPrbPolicyRatio"`
-	Priority          uint32 `yaml:"priority"`
+// toUint32 converts interface{} to uint32, handling both int and float64 from YAML parsing.
+func toUint32(v interface{}) uint32 {
+	switch val := v.(type) {
+	case int:
+		return uint32(val)
+	case int64:
+		return uint32(val)
+	case float64:
+		return uint32(val)
+	case uint32:
+		return val
+	default:
+		return 0
+	}
 }
 
 // NewPorchClient creates a new Porch client with the given configuration.
@@ -199,6 +179,7 @@ func (p *PorchClient) pullPackage(ctx context.Context, draftPkgID, localDir stri
 }
 
 // mutateSliceConfig modifies the srscellconfig.yaml in the local package directory.
+// Uses map[string]interface{} to preserve all original YAML fields.
 func (p *PorchClient) mutateSliceConfig(localDir string, config SliceConfig) error {
 	// Find the srscellconfig.yaml file
 	cellConfigPath := filepath.Join(localDir, "srscellconfig.yaml")
@@ -209,35 +190,58 @@ func (p *PorchClient) mutateSliceConfig(localDir string, config SliceConfig) err
 		return fmt.Errorf("failed to read srscellconfig.yaml: %w", err)
 	}
 
-	// Parse the YAML
-	var cellConfig SrsRANCellConfigYAML
+	// Parse the YAML into a generic map to preserve all fields
+	var cellConfig map[string]interface{}
 	if err := yaml.Unmarshal(data, &cellConfig); err != nil {
 		return fmt.Errorf("failed to parse srscellconfig.yaml: %w", err)
 	}
 
-	// Update or add the slice configuration
-	newSlice := SliceConfigYAML{
-		SST: config.SST,
-		SD:  config.SD,
-		SchedCfg: SchedCfgYAML{
-			MinPrbPolicyRatio: config.MinPrbPolicyRatio,
-			MaxPrbPolicyRatio: config.MaxPrbPolicyRatio,
-			Priority:          config.Priority,
+	// Get or create spec section
+	spec, ok := cellConfig["spec"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("srscellconfig.yaml missing or invalid 'spec' section")
+	}
+
+	// Create new slice config
+	newSlice := map[string]interface{}{
+		"sst": config.SST,
+		"sd":  config.SD,
+		"schedCfg": map[string]interface{}{
+			"minPrbPolicyRatio": config.MinPrbPolicyRatio,
+			"maxPrbPolicyRatio": config.MaxPrbPolicyRatio,
+			"priority":          config.Priority,
 		},
+	}
+
+	// Get existing slicing array or create new one
+	var slicing []interface{}
+	if existingSlicing, ok := spec["slicing"].([]interface{}); ok {
+		slicing = existingSlicing
 	}
 
 	// Check if slice with same SST/SD exists and update it, or add new
 	found := false
-	for i, slice := range cellConfig.Spec.Slicing {
-		if slice.SST == config.SST && slice.SD == config.SD {
-			cellConfig.Spec.Slicing[i] = newSlice
+	for i, s := range slicing {
+		slice, ok := s.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		// Compare SST and SD (handle both int and float64 from YAML parsing)
+		sliceSST := toUint32(slice["sst"])
+		sliceSD := toUint32(slice["sd"])
+		if sliceSST == config.SST && sliceSD == config.SD {
+			slicing[i] = newSlice
 			found = true
 			break
 		}
 	}
 	if !found {
-		cellConfig.Spec.Slicing = append(cellConfig.Spec.Slicing, newSlice)
+		slicing = append(slicing, newSlice)
 	}
+
+	// Update spec with new slicing
+	spec["slicing"] = slicing
+	cellConfig["spec"] = spec
 
 	// Marshal back to YAML
 	newData, err := yaml.Marshal(&cellConfig)

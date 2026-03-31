@@ -74,6 +74,7 @@ type E2EQoSIntentSpec struct {
 }
 
 // IntentGroupStatus represents the status of a single intent group.
+// Aligned with 3GPP TS 28.312 Intent Fulfillment concepts.
 type IntentGroupStatus struct {
 	// ID is the intent group identifier.
 	ID string `json:"id"`
@@ -82,6 +83,11 @@ type IntentGroupStatus struct {
 	// +kubebuilder:validation:Enum=Pending;Processing;Applied;Failed
 	Phase string `json:"phase"`
 
+	// FulfillmentState indicates whether the intent has been fulfilled per 3GPP TS 28.312.
+	// +kubebuilder:validation:Enum=NOT_FULFILLED;PARTIALLY_FULFILLED;FULFILLED;DEGRADED
+	// +optional
+	FulfillmentState string `json:"fulfillmentState,omitempty"`
+
 	// Message provides additional status information.
 	// +optional
 	Message string `json:"message,omitempty"`
@@ -89,6 +95,59 @@ type IntentGroupStatus struct {
 	// TranslatedParams contains the translated domain-specific parameters.
 	// +optional
 	TranslatedParams *TranslatedParams `json:"translatedParams,omitempty"`
+
+	// AchievedTargets reports whether each expected target has been achieved.
+	// +optional
+	AchievedTargets *AchievedTargets `json:"achievedTargets,omitempty"`
+
+	// DomainStatus contains the fulfillment status of each domain (Core/RAN).
+	// +optional
+	DomainStatus *DomainFulfillmentStatus `json:"domainStatus,omitempty"`
+}
+
+// AchievedTargets reports whether each expected target from the intent has been achieved.
+// Used for closed-loop verification per 3GPP TS 28.312.
+type AchievedTargets struct {
+	// Latency indicates if the latency target was achieved.
+	// +kubebuilder:validation:Enum=achieved;not_achieved;not_applicable
+	// +optional
+	Latency string `json:"latency,omitempty"`
+
+	// Bandwidth indicates if the bandwidth target was achieved.
+	// +kubebuilder:validation:Enum=achieved;not_achieved;not_applicable
+	// +optional
+	Bandwidth string `json:"bandwidth,omitempty"`
+
+	// ResourceShare indicates if the resource share allocation was applied.
+	// +kubebuilder:validation:Enum=achieved;not_achieved;not_applicable
+	// +optional
+	ResourceShare string `json:"resourceShare,omitempty"`
+}
+
+// DomainFulfillmentStatus reports the fulfillment status for each network domain.
+type DomainFulfillmentStatus struct {
+	// CoreDomain indicates the fulfillment status of the Core (5GC) domain.
+	// +optional
+	CoreDomain *DomainStatus `json:"coreDomain,omitempty"`
+
+	// RANDomain indicates the fulfillment status of the RAN domain.
+	// +optional
+	RANDomain *DomainStatus `json:"ranDomain,omitempty"`
+}
+
+// DomainStatus represents the status of a single domain.
+type DomainStatus struct {
+	// State indicates the current state of this domain.
+	// +kubebuilder:validation:Enum=CONFIGURED;PENDING;FAILED;SKIPPED
+	State string `json:"state"`
+
+	// Message provides additional information about the domain status.
+	// +optional
+	Message string `json:"message,omitempty"`
+
+	// LastUpdated indicates when this domain was last updated.
+	// +optional
+	LastUpdated *metav1.Time `json:"lastUpdated,omitempty"`
 }
 
 // TranslatedParams contains the translated parameters for Core and RAN domains.
@@ -130,11 +189,22 @@ type RANDomainParams struct {
 }
 
 // E2EQoSIntentStatus defines the observed state of E2EQoSIntent.
+// Aligned with 3GPP TS 28.312 Intent-driven Management closed-loop concepts.
 type E2EQoSIntentStatus struct {
 	// Phase indicates the overall phase of the E2EQoSIntent.
 	// +kubebuilder:validation:Enum=Pending;Processing;Applied;Failed
 	// +optional
 	Phase string `json:"phase,omitempty"`
+
+	// FulfillmentState indicates the overall intent fulfillment state per 3GPP TS 28.312.
+	// +kubebuilder:validation:Enum=NOT_FULFILLED;PARTIALLY_FULFILLED;FULFILLED;DEGRADED
+	// +optional
+	FulfillmentState string `json:"fulfillmentState,omitempty"`
+
+	// ObservedGeneration is the generation of the spec that was last processed.
+	// Used to detect spec changes and trigger re-reconciliation.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// Conditions represent the latest available observations of the intent's state.
 	// +optional
@@ -153,11 +223,13 @@ type E2EQoSIntentStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=e2eqos
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Fulfillment",type=string,JSONPath=`.status.fulfillmentState`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // E2EQoSIntent is the Schema for the E2E QoS Intent CRD.
 // It allows rApps to declare high-level E2E network slice intents that the
 // orchestrator translates into domain-specific configurations.
+// Aligned with 3GPP TS 28.312 Intent-driven Management framework.
 type E2EQoSIntent struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
