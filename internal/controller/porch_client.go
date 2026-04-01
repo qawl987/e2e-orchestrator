@@ -77,15 +77,19 @@ func NewPorchClient(namespace, publishedPackageID string) *PorchClient {
 	}
 }
 
-// UpdateRANSliceConfig performs the complete Nephio Porch workflow to update
-// the RAN slice configuration:
+// UpdateRANSliceConfigs performs the complete Nephio Porch workflow to update
+// the RAN slice configuration with ALL slices at once:
 // 1. Copy the published package to create a new draft
 // 2. Pull the draft to local filesystem
-// 3. Mutate the srscellconfig.yaml with new slice config
+// 3. Mutate the srscellconfig.yaml with all slice configs
 // 4. Push the changes back to the draft
 // 5. Propose the package
 // 6. Approve the package
-func (p *PorchClient) UpdateRANSliceConfig(ctx context.Context, config SliceConfig) error {
+func (p *PorchClient) UpdateRANSliceConfigs(ctx context.Context, configs []SliceConfig) error {
+	if len(configs) == 0 {
+		return fmt.Errorf("no slice configs provided")
+	}
+
 	// Generate a unique workspace name based on timestamp
 	workspace := fmt.Sprintf("intent-%s", time.Now().Format("20060102-150405"))
 	draftPkgID := fmt.Sprintf("regional.srsran-gnb.%s", workspace)
@@ -106,8 +110,8 @@ func (p *PorchClient) UpdateRANSliceConfig(ctx context.Context, config SliceConf
 		return fmt.Errorf("failed to pull package: %w", err)
 	}
 
-	// Step 3: Mutate the srscellconfig.yaml
-	if err := p.mutateSliceConfig(localDir, config); err != nil {
+	// Step 3: Mutate the srscellconfig.yaml with ALL slices
+	if err := p.mutateSliceConfigs(localDir, configs); err != nil {
 		// Cleanup on failure
 		os.RemoveAll(localDir)
 		return fmt.Errorf("failed to mutate slice config: %w", err)
@@ -134,10 +138,18 @@ func (p *PorchClient) UpdateRANSliceConfig(ctx context.Context, config SliceConf
 	// Cleanup
 	os.RemoveAll(localDir)
 
-	fmt.Printf("[Porch] Successfully updated RAN slice config: SST=%d, SD=%d, maxPRB=%d, priority=%d\n",
-		config.SST, config.SD, config.MaxPrbPolicyRatio, config.Priority)
+	fmt.Printf("[Porch] Successfully updated RAN with %d slice configs\n", len(configs))
+	for _, cfg := range configs {
+		fmt.Printf("  - SST=%d, SD=%d, maxPRB=%d, priority=%d\n",
+			cfg.SST, cfg.SD, cfg.MaxPrbPolicyRatio, cfg.Priority)
+	}
 
 	return nil
+}
+
+// UpdateRANSliceConfig is kept for backward compatibility but calls UpdateRANSliceConfigs
+func (p *PorchClient) UpdateRANSliceConfig(ctx context.Context, config SliceConfig) error {
+	return p.UpdateRANSliceConfigs(ctx, []SliceConfig{config})
 }
 
 // copyPackage creates a new draft by copying the published package.
@@ -178,9 +190,9 @@ func (p *PorchClient) pullPackage(ctx context.Context, draftPkgID, localDir stri
 	return nil
 }
 
-// mutateSliceConfig modifies the srscellconfig.yaml in the local package directory.
+// mutateSliceConfigs modifies the srscellconfig.yaml with ALL slice configs at once.
 // Uses map[string]interface{} to preserve all original YAML fields.
-func (p *PorchClient) mutateSliceConfig(localDir string, config SliceConfig) error {
+func (p *PorchClient) mutateSliceConfigs(localDir string, configs []SliceConfig) error {
 	// Find the srscellconfig.yaml file
 	cellConfigPath := filepath.Join(localDir, "srscellconfig.yaml")
 
@@ -202,44 +214,22 @@ func (p *PorchClient) mutateSliceConfig(localDir string, config SliceConfig) err
 		return fmt.Errorf("srscellconfig.yaml missing or invalid 'spec' section")
 	}
 
-	// Create new slice config
-	newSlice := map[string]interface{}{
-		"sst": config.SST,
-		"sd":  config.SD,
-		"schedCfg": map[string]interface{}{
-			"minPrbPolicyRatio": config.MinPrbPolicyRatio,
-			"maxPrbPolicyRatio": config.MaxPrbPolicyRatio,
-			"priority":          config.Priority,
-		},
-	}
-
-	// Get existing slicing array or create new one
-	var slicing []interface{}
-	if existingSlicing, ok := spec["slicing"].([]interface{}); ok {
-		slicing = existingSlicing
-	}
-
-	// Check if slice with same SST/SD exists and update it, or add new
-	found := false
-	for i, s := range slicing {
-		slice, ok := s.(map[string]interface{})
-		if !ok {
-			continue
+	// Build the complete slicing array from all configs
+	slicing := make([]interface{}, 0, len(configs))
+	for _, config := range configs {
+		newSlice := map[string]interface{}{
+			"sst": config.SST,
+			"sd":  config.SD,
+			"schedCfg": map[string]interface{}{
+				"minPrbPolicyRatio": config.MinPrbPolicyRatio,
+				"maxPrbPolicyRatio": config.MaxPrbPolicyRatio,
+				"priority":          config.Priority,
+			},
 		}
-		// Compare SST and SD (handle both int and float64 from YAML parsing)
-		sliceSST := toUint32(slice["sst"])
-		sliceSD := toUint32(slice["sd"])
-		if sliceSST == config.SST && sliceSD == config.SD {
-			slicing[i] = newSlice
-			found = true
-			break
-		}
-	}
-	if !found {
 		slicing = append(slicing, newSlice)
 	}
 
-	// Update spec with new slicing
+	// Replace slicing with new complete array
 	spec["slicing"] = slicing
 	cellConfig["spec"] = spec
 
@@ -254,7 +244,7 @@ func (p *PorchClient) mutateSliceConfig(localDir string, config SliceConfig) err
 		return fmt.Errorf("failed to write srscellconfig.yaml: %w", err)
 	}
 
-	fmt.Printf("[Porch] Mutated srscellconfig.yaml with slice config: SST=%d, SD=%d\n", config.SST, config.SD)
+	fmt.Printf("[Porch] Mutated srscellconfig.yaml with %d slice configs\n", len(configs))
 	return nil
 }
 

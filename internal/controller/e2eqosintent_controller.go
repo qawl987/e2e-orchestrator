@@ -85,18 +85,91 @@ func (r *E2EQoSIntentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	// 3. Iterate through intentGroups and translate each one.
+	// 3. Collect all slice configs from intent groups first, then apply once to Porch.
 	var intentGroupStatuses []e2ev1alpha1.IntentGroupStatus
+	var allSliceConfigs []SliceConfig
 	allApplied := true
 	hasFailed := false
 
+	// Phase 1: Translate all intent groups and collect RAN params
 	for _, group := range intent.Spec.IntentGroups {
-		groupStatus := r.processIntentGroup(ctx, logger, &group)
+		groupStatus := r.translateIntentGroup(logger, &group)
 		intentGroupStatuses = append(intentGroupStatuses, groupStatus)
-		if groupStatus.Phase != "Applied" {
+
+		// Collect RAN slice config if translation succeeded
+		if groupStatus.TranslatedParams != nil && groupStatus.TranslatedParams.RANParams != nil {
+			ranParams := groupStatus.TranslatedParams.RANParams
+			allSliceConfigs = append(allSliceConfigs, SliceConfig{
+				SST:               ranParams.SST,
+				SD:                ranParams.SD,
+				MinPrbPolicyRatio: ranParams.MinPrbPolicyRatio,
+				MaxPrbPolicyRatio: ranParams.MaxPrbPolicyRatio,
+				Priority:          ranParams.Priority,
+			})
+		}
+	}
+
+	// Phase 2: Apply ALL slices to RAN domain via single Porch workflow
+	if r.PorchClient != nil && len(allSliceConfigs) > 0 {
+		logger.Info("Applying all slice configs to RAN via Porch", "sliceCount", len(allSliceConfigs))
+		if err := r.PorchClient.UpdateRANSliceConfigs(ctx, allSliceConfigs); err != nil {
+			logger.Error(err, "Failed to update RAN slice configs via Porch")
+			hasFailed = true
+			// Mark all groups as failed for RAN domain
+			now := metav1.Now()
+			for i := range intentGroupStatuses {
+				intentGroupStatuses[i].Phase = "Failed"
+				intentGroupStatuses[i].FulfillmentState = "NOT_FULFILLED"
+				intentGroupStatuses[i].Message = fmt.Sprintf("Failed to update RAN config: %v", err)
+				if intentGroupStatuses[i].DomainStatus != nil && intentGroupStatuses[i].DomainStatus.RANDomain != nil {
+					intentGroupStatuses[i].DomainStatus.RANDomain.State = "FAILED"
+					intentGroupStatuses[i].DomainStatus.RANDomain.Message = err.Error()
+					intentGroupStatuses[i].DomainStatus.RANDomain.LastUpdated = &now
+				}
+			}
+		} else {
+			// Mark all groups as applied
+			now := metav1.Now()
+			for i := range intentGroupStatuses {
+				intentGroupStatuses[i].Phase = "Applied"
+				intentGroupStatuses[i].FulfillmentState = "FULFILLED"
+				intentGroupStatuses[i].Message = "Intent successfully translated and applied to RAN domain"
+				if intentGroupStatuses[i].DomainStatus != nil && intentGroupStatuses[i].DomainStatus.RANDomain != nil {
+					ranParams := intentGroupStatuses[i].TranslatedParams.RANParams
+					intentGroupStatuses[i].DomainStatus.RANDomain.State = "CONFIGURED"
+					intentGroupStatuses[i].DomainStatus.RANDomain.Message = fmt.Sprintf("Slice configured: SST=%d, SD=%d, maxPRB=%d", ranParams.SST, ranParams.SD, ranParams.MaxPrbPolicyRatio)
+					intentGroupStatuses[i].DomainStatus.RANDomain.LastUpdated = &now
+				}
+				// Update achieved targets
+				if intentGroupStatuses[i].AchievedTargets != nil {
+					intentGroupStatuses[i].AchievedTargets.ResourceShare = "achieved"
+					group := intent.Spec.IntentGroups[i]
+					if group.Expectations.SliceType == "URLLC" {
+						intentGroupStatuses[i].AchievedTargets.Latency = "achieved"
+					} else if group.Expectations.SliceType == "eMBB" {
+						intentGroupStatuses[i].AchievedTargets.Bandwidth = "achieved"
+					}
+				}
+			}
+		}
+	} else if r.PorchClient == nil {
+		logger.Info("PorchClient not configured, skipping RAN domain update")
+		for i := range intentGroupStatuses {
+			intentGroupStatuses[i].Phase = "Applied"
+			intentGroupStatuses[i].FulfillmentState = "FULFILLED"
+			if intentGroupStatuses[i].DomainStatus != nil && intentGroupStatuses[i].DomainStatus.RANDomain != nil {
+				intentGroupStatuses[i].DomainStatus.RANDomain.State = "SKIPPED"
+				intentGroupStatuses[i].DomainStatus.RANDomain.Message = "PorchClient not configured"
+			}
+		}
+	}
+
+	// Check final status
+	for _, gs := range intentGroupStatuses {
+		if gs.Phase != "Applied" {
 			allApplied = false
 		}
-		if groupStatus.Phase == "Failed" {
+		if gs.Phase == "Failed" {
 			hasFailed = true
 		}
 	}
@@ -160,10 +233,11 @@ func (r *E2EQoSIntentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	return ctrl.Result{}, nil
 }
 
-// processIntentGroup translates and applies a single intent group.
-func (r *E2EQoSIntentReconciler) processIntentGroup(ctx context.Context, logger logr.Logger, group *e2ev1alpha1.IntentGroup) e2ev1alpha1.IntentGroupStatus {
+// translateIntentGroup translates a single intent group to domain parameters.
+// Does NOT apply to Porch - that's done in bulk in Reconcile.
+func (r *E2EQoSIntentReconciler) translateIntentGroup(logger logr.Logger, group *e2ev1alpha1.IntentGroup) e2ev1alpha1.IntentGroupStatus {
 	logger = logger.WithValues("intentGroup", group.ID)
-	logger.Info("Processing intent group")
+	logger.Info("Translating intent group")
 
 	now := metav1.Now()
 	status := e2ev1alpha1.IntentGroupStatus{
@@ -197,7 +271,7 @@ func (r *E2EQoSIntentReconciler) processIntentGroup(ctx context.Context, logger 
 		status.AchievedTargets.Bandwidth = "not_achieved"
 	}
 
-	// 1. Translate intent to domain-specific parameters.
+	// Translate intent to domain-specific parameters
 	coreParams := translateToCoreParams(group)
 	ranParams := translateToRANParams(group)
 
@@ -211,70 +285,6 @@ func (r *E2EQoSIntentReconciler) processIntentGroup(ctx context.Context, logger 
 		"ranParams", fmt.Sprintf("SST=%d, SD=%d, minPRB=%d, maxPRB=%d, priority=%d",
 			ranParams.SST, ranParams.SD, ranParams.MinPrbPolicyRatio, ranParams.MaxPrbPolicyRatio, ranParams.Priority))
 
-	// 2. Apply to Core Domain (free5GC WebConsole).
-	// NOTE: Commented out - UEs are already registered manually.
-	// Uncomment and implement when free5GC REST API integration is ready.
-	/*
-		for _, ue := range group.Contexts.TargetUEs {
-			if err := registerUEToFree5GCWebConsole(ue, coreParams.QFI); err != nil {
-				logger.Error(err, "Failed to register UE to free5GC", "ue", ue)
-				status.Phase = "Failed"
-				status.FulfillmentState = "NOT_FULFILLED"
-				status.Message = fmt.Sprintf("Failed to register UE %s: %v", ue, err)
-				status.DomainStatus.CoreDomain.State = "FAILED"
-				status.DomainStatus.CoreDomain.Message = err.Error()
-				return status
-			}
-		}
-		status.DomainStatus.CoreDomain.State = "CONFIGURED"
-	*/
-	logger.Info("Skipping free5GC UE registration (UEs already registered manually)")
-
-	// 3. Apply to RAN Domain via Nephio Porch workflow.
-	if r.PorchClient != nil {
-		sliceConfig := SliceConfig{
-			SST:               ranParams.SST,
-			SD:                ranParams.SD,
-			MinPrbPolicyRatio: ranParams.MinPrbPolicyRatio,
-			MaxPrbPolicyRatio: ranParams.MaxPrbPolicyRatio,
-			Priority:          ranParams.Priority,
-		}
-
-		if err := r.PorchClient.UpdateRANSliceConfig(ctx, sliceConfig); err != nil {
-			logger.Error(err, "Failed to update RAN slice config via Porch")
-			status.Phase = "Failed"
-			status.FulfillmentState = "NOT_FULFILLED"
-			status.Message = fmt.Sprintf("Failed to update RAN config: %v", err)
-			status.DomainStatus.RANDomain.State = "FAILED"
-			status.DomainStatus.RANDomain.Message = err.Error()
-			now := metav1.Now()
-			status.DomainStatus.RANDomain.LastUpdated = &now
-			return status
-		}
-
-		// RAN domain configured successfully
-		now := metav1.Now()
-		status.DomainStatus.RANDomain.State = "CONFIGURED"
-		status.DomainStatus.RANDomain.Message = fmt.Sprintf("Slice configured: SST=%d, SD=%d, maxPRB=%d", ranParams.SST, ranParams.SD, ranParams.MaxPrbPolicyRatio)
-		status.DomainStatus.RANDomain.LastUpdated = &now
-	} else {
-		logger.Info("PorchClient not configured, skipping RAN domain update")
-		status.DomainStatus.RANDomain.State = "SKIPPED"
-		status.DomainStatus.RANDomain.Message = "PorchClient not configured"
-	}
-
-	// Update achieved targets - mark as achieved after successful configuration
-	status.AchievedTargets.ResourceShare = "achieved"
-	if group.Expectations.SliceType == "URLLC" {
-		status.AchievedTargets.Latency = "achieved"
-	} else if group.Expectations.SliceType == "eMBB" {
-		status.AchievedTargets.Bandwidth = "achieved"
-	}
-
-	// Mark as fulfilled
-	status.Phase = "Applied"
-	status.FulfillmentState = "FULFILLED"
-	status.Message = "Intent successfully translated and applied to RAN domain"
 	return status
 }
 

@@ -3,26 +3,21 @@ kind: E2EQoSIntent
 metadata:
   name: slices-intent
 spec:
-  # 定義一個陣列 (Array)，讓 Operator 可以迴圈處理每一個切片意圖
-  intentGroups:
-    # ---------------- 第一個意圖：eMBB ----------------
+  intentGroups: # IntentExpectation
     - id: "embb"
-      contexts:
+      contexts: # IntentContext
         targetUEs: ["208930000000001"]
-      expectations:
+      expectations: # ExpectationTarget
         sliceType: "eMBB"
-        bandwidth: "high"        # 轉譯器對應：5QI=6
-        resourceShare: "Partial" # 轉譯器對應：maxPrb=50, priority=10
-    # ---------------- 第二個意圖：URLLC 無人機 ----------------
+        bandwidth: "high"        # Translator mapping: 5QI=6
+        resourceShare: "Partial"    # Translator mapping: maxPrb=50, priority=10
     - id: "urllc"
-      # 對應 3GPP: Contexts (條件/範圍，針對哪個 UE)
       contexts:
         targetUEs: ["208930000000002"]
-      # 對應 3GPP: Expectations & Targets (期望與目標 SLA)
       expectations:
         sliceType: "URLLC"
-        latency: "ultra-low"     # 轉譯器對應：5QI=85
-        resourceShare: "Full"    # 轉譯器對應：maxPrb=100, priority=200
+        latency: "ultra-low"     # Translator mapping: 5QI=85
+        resourceShare: "Full" # Translator mapping: maxPrb=100, priority=200
 
 # ============================================================================
 # Status 說明 (由 E2E Orchestrator 自動填寫，符合 3GPP TS 28.312 閉環控制)
