@@ -54,6 +54,9 @@ func main() {
 	var probeAddr string
 	var porchNamespace string
 	var porchPublishedPackage string
+	var free5gcURL string
+	var free5gcUsername string
+	var free5gcPassword string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":9443", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -63,6 +66,9 @@ func main() {
 	flag.StringVar(&porchNamespace, "porch-namespace", "default", "Namespace where Porch PackageRevisions are stored.")
 	flag.StringVar(&porchPublishedPackage, "porch-published-package", "regional.srsran-gnb.packagevariant-1",
 		"The ID of the published srsran-gnb package to use as base.")
+	flag.StringVar(&free5gcURL, "free5gc-url", "", "free5GC WebConsole URL (e.g., http://localhost:5000). If empty, UE registration is skipped.")
+	flag.StringVar(&free5gcUsername, "free5gc-username", "admin", "free5GC WebConsole username.")
+	flag.StringVar(&free5gcPassword, "free5gc-password", "free5gc", "free5GC WebConsole password.")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -87,11 +93,21 @@ func main() {
 	// Initialize Porch client for RAN domain orchestration
 	porchClient := controller.NewPorchClient(porchNamespace, porchPublishedPackage)
 
+	// Initialize free5GC WebConsole client for Core domain UE registration
+	var free5gcClient *controller.Free5GCClient
+	if free5gcURL != "" {
+		free5gcClient = controller.NewFree5GCClient(free5gcURL, free5gcUsername, free5gcPassword)
+		setupLog.Info("free5GC WebConsole client configured", "url", free5gcURL)
+	} else {
+		setupLog.Info("free5GC WebConsole URL not configured, UE registration will be skipped")
+	}
+
 	// Set up the E2EQoSIntent controller
 	if err = (&controller.E2EQoSIntentReconciler{
-		Client:      mgr.GetClient(),
-		Scheme:      mgr.GetScheme(),
-		PorchClient: porchClient,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		PorchClient:   porchClient,
+		Free5GCClient: free5gcClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "E2EQoSIntent")
 		os.Exit(1)

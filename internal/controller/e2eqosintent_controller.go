@@ -36,8 +36,9 @@ import (
 // E2EQoSIntentReconciler reconciles E2EQoSIntent objects.
 type E2EQoSIntentReconciler struct {
 	client.Client
-	Scheme      *runtime.Scheme
-	PorchClient *PorchClient
+	Scheme        *runtime.Scheme
+	PorchClient   *PorchClient
+	Free5GCClient *Free5GCClient
 }
 
 // +kubebuilder:rbac:groups=e2e.intent.domain,resources=e2eqosintents,verbs=get;list;watch;create;update;patch;delete
@@ -106,6 +107,67 @@ func (r *E2EQoSIntentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				MaxPrbPolicyRatio: ranParams.MaxPrbPolicyRatio,
 				Priority:          ranParams.Priority,
 			})
+		}
+	}
+
+	// Phase 1.5: Register UEs to Core domain (free5GC) via WebConsole API
+	if r.Free5GCClient != nil {
+		logger.Info("Registering UEs to Core domain via free5GC WebConsole")
+		for i, group := range intent.Spec.IntentGroups {
+			if intentGroupStatuses[i].TranslatedParams == nil {
+				continue
+			}
+			coreParams := intentGroupStatuses[i].TranslatedParams.CoreParams
+			ranParams := intentGroupStatuses[i].TranslatedParams.RANParams
+			if coreParams == nil || ranParams == nil {
+				continue
+			}
+
+			// Register each target UE
+			coreSuccess := true
+			var coreErrMsg string
+			for _, ue := range group.Contexts.TargetUEs {
+				logger.Info("Registering UE to free5GC", "imsi", ue, "5QI", coreParams.FiveQI, "SST", ranParams.SST, "SD", ranParams.SD)
+				if err := r.Free5GCClient.RegisterSubscriber(ue, coreParams.FiveQI, ranParams.SST, ranParams.SD); err != nil {
+					logger.Error(err, "Failed to register UE", "imsi", ue)
+					coreSuccess = false
+					coreErrMsg = err.Error()
+					break
+				}
+			}
+
+			// Update Core domain status
+			now := metav1.Now()
+			if intentGroupStatuses[i].DomainStatus == nil {
+				intentGroupStatuses[i].DomainStatus = &e2ev1alpha1.DomainFulfillmentStatus{}
+			}
+			if coreSuccess {
+				intentGroupStatuses[i].DomainStatus.CoreDomain = &e2ev1alpha1.DomainStatus{
+					State:       "CONFIGURED",
+					Message:     fmt.Sprintf("UEs registered with 5QI=%d", coreParams.FiveQI),
+					LastUpdated: &now,
+				}
+			} else {
+				intentGroupStatuses[i].DomainStatus.CoreDomain = &e2ev1alpha1.DomainStatus{
+					State:       "FAILED",
+					Message:     coreErrMsg,
+					LastUpdated: &now,
+				}
+				hasFailed = true
+			}
+		}
+	} else {
+		logger.Info("Free5GCClient not configured, skipping Core domain UE registration")
+		now := metav1.Now()
+		for i := range intentGroupStatuses {
+			if intentGroupStatuses[i].DomainStatus == nil {
+				intentGroupStatuses[i].DomainStatus = &e2ev1alpha1.DomainFulfillmentStatus{}
+			}
+			intentGroupStatuses[i].DomainStatus.CoreDomain = &e2ev1alpha1.DomainStatus{
+				State:       "SKIPPED",
+				Message:     "Free5GCClient not configured",
+				LastUpdated: &now,
+			}
 		}
 	}
 

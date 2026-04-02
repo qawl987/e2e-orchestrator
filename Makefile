@@ -10,6 +10,13 @@ ENVTEST ?= $(shell which setup-envtest 2>/dev/null || echo go run sigs.k8s.io/co
 OPERATOR_NS    ?= e2e-orchestrator
 KUBECONFIG     ?= ~/.kube/config
 
+# Regional cluster kubeconfig for free5GC webconsole access
+REGIONAL_KUBECONFIG ?= /home/free5gc/regional.kubeconfig
+
+# free5GC WebConsole credentials
+FREE5GC_USERNAME ?= admin
+FREE5GC_PASSWORD ?= free5gc
+
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 GOBIN=$(shell go env GOBIN)
 ifeq ($(GOBIN),)
@@ -65,6 +72,21 @@ build: fmt vet ## Build manager binary.
 .PHONY: run
 run: fmt vet ## Run manager from your host (requires kubeconfig).
 	go run ./cmd/main.go
+
+.PHONY: run-webconsole
+run-webconsole: fmt vet ## Run manager with free5GC webconsole integration.
+	@echo "Detecting free5GC WebConsole URL from regional cluster..."
+	$(eval NODE_IP := $(shell KUBECONFIG=$(REGIONAL_KUBECONFIG) kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null))
+	$(eval NODE_PORT := $(shell KUBECONFIG=$(REGIONAL_KUBECONFIG) kubectl get svc webui-service -n free5gc-cp -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null))
+	@if [ -z "$(NODE_IP)" ] || [ -z "$(NODE_PORT)" ]; then \
+		echo "Error: Could not detect WebConsole URL. Check REGIONAL_KUBECONFIG=$(REGIONAL_KUBECONFIG)"; \
+		exit 1; \
+	fi
+	@echo "Using WebConsole URL: http://$(NODE_IP):$(NODE_PORT)"
+	go run ./cmd/main.go \
+		--free5gc-url http://$(NODE_IP):$(NODE_PORT) \
+		--free5gc-username $(FREE5GC_USERNAME) \
+		--free5gc-password $(FREE5GC_PASSWORD)
 
 .PHONY: docker-build
 docker-build: ## Build container image.
