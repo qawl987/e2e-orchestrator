@@ -10,16 +10,16 @@ spec:
       expectations: # ExpectationTarget
         sliceType: "eMBB"
         bandwidth: "high"        # Translator mapping: 5QI=6
-        # resourceShare: "Partial"    # Translator mapping: maxPrb=50, priority=10
-        resourceShare: "Full"
+        resourceShare: "Partial"    # Translator mapping: maxPrb=50, priority=10
+        # resourceShare: "Full"
     - id: "urllc"
       contexts:
         targetUEs: ["208930000000002"]
       expectations:
         sliceType: "URLLC"
         latency: "ultra-low"     # Translator mapping: 5QI=85
-        resourceShare: "Partial"
-        # resourceShare: "Full" # Translator mapping: maxPrb=100, priority=200
+        # resourceShare: "Partial"
+        resourceShare: "Full" # Translator mapping: maxPrb=100, priority=200
 
 # ============================================================================
 # Status 說明 (由 E2E Orchestrator 自動填寫，符合 3GPP TS 28.312 閉環控制)
