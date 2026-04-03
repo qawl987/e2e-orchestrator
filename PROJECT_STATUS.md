@@ -236,17 +236,60 @@ curl http://localhost:5000/api/subscriber -H "Token: <access_token>"
 
 ## E2E Pipeline 延遲分析
 
-實測時間線：
+### 理想情況（無 ConfigSync wait 阻塞）
 
-| 階段 | 耗時 | 時間戳來源 |
-|------|------|------------|
-| E2E Orchestrator 翻譯 | < 1 sec | `server.log` |
-| Porch workflow | ~3-4 sec | `server.log` |
-| Config Sync 同步 | ~5 min | `SrsRANCellConfig.metadata.managedFields[].time` |
-| srsran-operator | < 1 sec | N/A |
-| **總計** | **~5-6 min** | |
+| 階段 | 耗時 | 說明 |
+|------|------|------|
+| E2E Orchestrator 翻譯 | < 1 sec | Intent → RAN/Core 配置 |
+| Porch workflow | ~7 sec | Clone → Edit → Propose → Approve |
+| ConfigSync 同步 | ~15-20 sec | Git poll (15s) + apply |
+| srsran-operator | < 0.1 sec | ConfigMap 生成 |
+| **總計** | **~25-30 sec** | |
 
-**瓶頸**：Config Sync 的 Git 輪詢間隔 (預設 5 分鐘)
+### 已知問題：NFDeployment Status 未更新導致 ConfigSync Wait Timeout
+
+**問題描述**：
+
+ConfigSync 在 apply 資源後會進入 wait 階段，等待所有資源達到 "Current" 狀態。以下 4 個 NFDeployment 資源因為對應的 operator 沒有更新其 status，導致 ConfigSync 每次同步都要等待 **5 分鐘** timeout：
+
+1. `free5gc-cp/NFDeployment/amf-regional` - free5gc-operator 不處理
+2. `free5gc-cp/NFDeployment/smf-regional` - free5gc-operator 不處理
+3. `free5gc-upf/NFDeployment/upf-regional` - free5gc-operator 不處理
+4. `srsran-gnb/NFDeployment/gnb-regional` - **srsran-operator 需要更新 status**
+
+**影響**：
+
+- 每次 Porch approve 產生 4 個 Git commits
+- ConfigSync 對每個 commit 都需要 5 分鐘 wait timeout
+- 連續測試時，後續測試會被前一個 commit 的 wait 阻塞
+- 實際測量的 ConfigSync 時間可能從 20 秒變成 120+ 秒 timeout
+
+**解決方案**：
+
+需要修改 **兩個 operator**，讓它們在 reconcile NFDeployment 後更新 status：
+
+1. **srsran-operator** - 負責 `srsran-gnb/gnb-regional`
+2. **free5gc-operator** - 負責 `amf-regional`、`smf-regional`、`upf-regional`
+
+只要任何一個 NFDeployment 沒有更新 status，ConfigSync 就會 timeout。必須全部修復才能消除 5 分鐘延遲。
+
+```go
+// 在 reconcile 結束前加入（兩個 operator 都需要）
+nfDeploy.Status.Conditions = []metav1.Condition{
+    {
+        Type:               "Ready",
+        Status:             metav1.ConditionTrue,
+        LastTransitionTime: metav1.Now(),
+        Reason:             "Reconciled",
+        Message:            "NFDeployment reconciled successfully",
+    },
+}
+return r.Status().Update(ctx, nfDeploy)
+```
+
+**臨時解決方案**：
+
+測量延遲時，確保每次測試間隔 > 5 分鐘，避免被前一次的 wait 阻塞。
 
 ### 時間戳檢查命令
 
@@ -254,16 +297,41 @@ curl http://localhost:5000/api/subscriber -H "Token: <access_token>"
 # Step 1-2: E2E Orchestrator log
 grep 'Spec changed\|Approved package' server.log
 
-# Step 3: Config Sync 同步時間
+# Step 3: Config Sync 同步狀態
 KUBECONFIG=/home/free5gc/regional.kubeconfig \
-  kubectl get srsrancellconfig gnb-cell-config -n srsran-gnb \
-  -o jsonpath='{.metadata.managedFields[0].time}'
+  kubectl get rootsync regional -n config-management-system \
+  -o jsonpath='{.status.sync.lastUpdate}'
 
-# Step 4: ConfigMap (無直接時間戳，只有 resourceVersion)
+# Step 4: ConfigMap 版本
 KUBECONFIG=/home/free5gc/regional.kubeconfig \
   kubectl get configmap gnb-regional-du-config -n srsran-gnb \
   -o jsonpath='{.metadata.resourceVersion}'
+
+# 檢查 ConfigSync wait timeout 資源
+KUBECONFIG=/home/free5gc/regional.kubeconfig \
+  kubectl logs -n config-management-system deploy/root-reconciler-regional \
+  --tail=100 | grep "Timeout"
 ```
+
+---
+
+## Operator 待修復問題
+
+### 1. srsran-operator: SrsRANCellConfig Watch 問題（已修復）
+
+**問題**：`findNFDeploymentsForConfig` 使用 `obj.GetObjectKind().GroupVersionKind().Kind` 取得資源類型，但 controller-runtime 從 cache 讀取的對象不會自動設置 GVK，導致 watch handler 無法正確觸發 reconcile。
+
+**修復**：使用 Go type switch 判斷對象類型（已在 2026-04-02 修復）。
+
+### 2. NFDeployment Status 未更新（待修復）
+
+**問題**：srsran-operator 和 free5gc-operator reconcile NFDeployment 後都沒有更新 status，導致 ConfigSync wait 階段永遠 timeout。
+
+**影響**：ConfigSync 每次同步需要額外 5 分鐘 wait timeout。
+
+**需修復的 Operator**：
+- **srsran-operator**：`/home/free5gc/srsran-operator/internal/controller/randeployment_controller.go`
+- **free5gc-operator**：對應的 controller 檔案
 
 ---
 
