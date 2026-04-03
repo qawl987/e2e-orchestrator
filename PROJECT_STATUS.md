@@ -246,50 +246,59 @@ curl http://localhost:5000/api/subscriber -H "Token: <access_token>"
 | srsran-operator | < 0.1 sec | ConfigMap 生成 |
 | **總計** | **~25-30 sec** | |
 
-### 已知問題：NFDeployment Status 未更新導致 ConfigSync Wait Timeout
+### ✅ 已解決：NFDeployment Status 導致 ConfigSync Wait Timeout
 
 **問題描述**：
 
-ConfigSync 在 apply 資源後會進入 wait 階段，等待所有資源達到 "Current" 狀態。以下 4 個 NFDeployment 資源因為對應的 operator 沒有更新其 status，導致 ConfigSync 每次同步都要等待 **5 分鐘** timeout：
+ConfigSync 使用 **kstatus** 來判斷資源是否達到 "Current" 狀態。kstatus 會檢查：
+1. `status.conditions` 中是否有 `Ready` condition 且 `status: True`
+2. `status.observedGeneration` 是否等於 `metadata.generation`
 
-1. `free5gc-cp/NFDeployment/amf-regional` - free5gc-operator 不處理
-2. `free5gc-cp/NFDeployment/smf-regional` - free5gc-operator 不處理
-3. `free5gc-upf/NFDeployment/upf-regional` - free5gc-operator 不處理
-4. `srsran-gnb/NFDeployment/gnb-regional` - **srsran-operator 需要更新 status**
+原本 4 個 NFDeployment 資源都有問題，導致 ConfigSync 每次同步都要等待 **2 分鐘** timeout：
 
-**影響**：
+1. `free5gc-cp/NFDeployment/amf-regional`
+2. `free5gc-cp/NFDeployment/smf-regional`
+3. `free5gc-upf/NFDeployment/upf-regional`
+4. `srsran-gnb/NFDeployment/gnb-regional`
 
-- 每次 Porch approve 產生 4 個 Git commits
-- ConfigSync 對每個 commit 都需要 5 分鐘 wait timeout
-- 連續測試時，後續測試會被前一個 commit 的 wait 阻塞
-- 實際測量的 ConfigSync 時間可能從 20 秒變成 120+ 秒 timeout
+**根本原因**：
 
-**解決方案**：
+1. **free5gc-operator**：使用底層 Deployment 的 `generation` 而非 NFDeployment 的 `generation` 來設定 `observedGeneration`
+   ```
+   amf-regional: gen=2, observedGeneration=3 (不匹配)
+   smf-regional: gen=1, observedGeneration=2238 (不匹配)
+   upf-regional: gen=3, observedGeneration=2242 (不匹配)
+   ```
 
-需要修改 **兩個 operator**，讓它們在 reconcile NFDeployment 後更新 status：
+2. **srsran-operator**：沒有更新 `observedGeneration`，導致值始終為 0
+   ```
+   gnb-regional: gen=1, observedGeneration=0 (不匹配)
+   ```
 
-1. **srsran-operator** - 負責 `srsran-gnb/gnb-regional`
-2. **free5gc-operator** - 負責 `amf-regional`、`smf-regional`、`upf-regional`
+**解決方案（已實作）**：
 
-只要任何一個 NFDeployment 沒有更新 status，ConfigSync 就會 timeout。必須全部修復才能消除 5 分鐘延遲。
+1. **free5gc-operator** (`controllers/nf/*/status.go`)：
+   - 修改 `createNfDeploymentStatus()` 使用 `nfDeployment.Generation` 而非 `deployment.Generation`
+   - 在 deployment Available 時同時加入 `Ready` condition
 
-```go
-// 在 reconcile 結束前加入（兩個 operator 都需要）
-nfDeploy.Status.Conditions = []metav1.Condition{
-    {
-        Type:               "Ready",
-        Status:             metav1.ConditionTrue,
-        LastTransitionTime: metav1.Now(),
-        Reason:             "Reconciled",
-        Message:            "NFDeployment reconciled successfully",
-    },
-}
-return r.Status().Update(ctx, nfDeploy)
+2. **srsran-operator** (`internal/controller/randeployment_controller.go`)：
+   - 修改 `updateStatusIfRequired()` 設定 `nfDeploy.Status.ObservedGeneration = int32(nfDeploy.Generation)`
+   - 加入 `Ready` condition
+
+**修復後狀態**：
+```
+free5gc-cp/amf-regional: gen=2, observedGeneration=2 ✓, Ready=True
+free5gc-cp/smf-regional: gen=1, observedGeneration=1 ✓, Ready=True
+free5gc-upf/upf-regional: gen=3, observedGeneration=3 ✓, Ready=True
+srsran-gnb/gnb-regional: gen=1, observedGeneration=1 ✓, Ready=True
 ```
 
-**臨時解決方案**：
+**效能改善**：
 
-測量延遲時，確保每次測試間隔 > 5 分鐘，避免被前一次的 wait 阻塞。
+| 測試 | ConfigSync 時間 | 總時間 |
+|------|----------------|--------|
+| 修復前（timeout） | 120s | 249s |
+| 修復後 | ~20-27s | ~30-36s |
 
 ### 時間戳檢查命令
 
@@ -323,15 +332,21 @@ KUBECONFIG=/home/free5gc/regional.kubeconfig \
 
 **修復**：使用 Go type switch 判斷對象類型（已在 2026-04-02 修復）。
 
-### 2. NFDeployment Status 未更新（待修復）
+### 2. NFDeployment Status 導致 ConfigSync Timeout（已修復）
 
-**問題**：srsran-operator 和 free5gc-operator reconcile NFDeployment 後都沒有更新 status，導致 ConfigSync wait 階段永遠 timeout。
+**問題**：srsran-operator 和 free5gc-operator reconcile NFDeployment 後 status 設定不正確：
+- `observedGeneration` 值錯誤（free5gc 使用底層 Deployment 的 generation，srsran 不更新）
+- 缺少 `Ready` condition
 
-**影響**：ConfigSync 每次同步需要額外 5 分鐘 wait timeout。
+**修復**（2026-04-03）：
+- **srsran-operator**：`updateStatusIfRequired()` 加入 `ObservedGeneration` 設定和 `Ready` condition
+- **free5gc-operator**：`createNfDeploymentStatus()` 改用 `nfDeployment.Generation`，加入 `Ready` condition
 
-**需修復的 Operator**：
-- **srsran-operator**：`/home/free5gc/srsran-operator/internal/controller/randeployment_controller.go`
-- **free5gc-operator**：對應的 controller 檔案
+**修改的檔案**：
+- `/home/free5gc/srsran-operator/internal/controller/randeployment_controller.go`
+- `/home/free5gc/free5gc/controllers/nf/amf/status.go`
+- `/home/free5gc/free5gc/controllers/nf/smf/status.go`
+- `/home/free5gc/free5gc/controllers/nf/upf/status.go`
 
 ---
 
