@@ -98,25 +98,38 @@ spec:
 | Full | 0 | 100 |
 | Partial | 0 | 50 |
 
-### 3. Core Domain 南向介面 (Hybrid REST)
+### 3. Core Domain 南向介面 (free5GC WebConsole REST)
 
-提供 `free5gc_client.go` 骨架程式碼，包含：
+已完成 free5GC WebConsole REST API 整合，Controller 會在 Reconcile 時依照 intent 轉譯出的 5QI/S-NSSAI，為每個 `targetUEs` 自動建立或更新 free5GC subscriber。
 
-- `registerUEToFree5GCWebConsole(ue, qfi)` - UE 註冊佔位函數
-- `Free5GCClient` struct - WebConsole REST API 客戶端骨架
-- 詳細的 TODO 註解說明預期的 API payload 格式
+`free5gc_client.go` 包含：
 
-```go
-// 預期實作的 REST API payload 結構
+- `Free5GCClient` struct - free5GC WebConsole REST API client
+- `Login()` - 呼叫 `POST /api/login` 取得 WebConsole access token
+- `RegisterSubscriber(imsi, fiveQI, sst, sd)` - 呼叫 `POST /api/subscriber/{ueId}/{plmnId}` 建立 UE
+- `UpdateSubscriberQoS(imsi, fiveQI, sst, sd)` - subscriber 已存在時呼叫 `PUT /api/subscriber/{ueId}/{plmnId}` 更新 QoS/S-NSSAI
+- `DeleteSubscriber(imsi)` - 呼叫 `DELETE /api/subscriber/{ueId}/{plmnId}` 刪除 UE
+- 401 token 失效時自動重新登入並重試
+- 409 subscriber 已存在時自動改用 PUT 更新
+
+free5GC WebConsole subscriber payload 核心欄位：
+
+```json
 {
   "plmnID": "20893",
   "ueId": "imsi-208930000000001",
+  "AccessAndMobilitySubscriptionData": {
+    "nssai": {
+      "defaultSingleNssais": [{"sst": 1, "sd": "010203"}],
+      "singleNssais": [{"sst": 1, "sd": "010203"}]
+    }
+  },
   "SessionManagementSubscriptionData": [{
     "singleNssai": {"sst": 1, "sd": "010203"},
     "dnnConfigurations": {
       "internet": {
         "5gQosProfile": {
-          "5qi": <qfi>,
+          "5qi": 6,
           "arp": {"priorityLevel": 8}
         }
       }
@@ -124,6 +137,17 @@ spec:
   }]
 }
 ```
+
+預設 Core 參數：
+
+| 項目 | 預設值 |
+|------|--------|
+| PLMN ID | `20893` |
+| DNN | `internet` |
+| PDU Session Type | `IPV4` |
+| SSC Mode | `SSC_MODE_1` |
+| ARP Priority Level | `8` |
+| Authentication Method | `5G_AKA` |
 
 ### 4. RAN Domain 南向介面 (Nephio Porch Workflow)
 
@@ -146,8 +170,9 @@ spec:
 `porch_client.go` 包含：
 
 - `PorchClient` struct - Porch CLI 包裝器
-- `UpdateRANSliceConfig()` - 完整的工作流程實作
-- `mutateSliceConfig()` - YAML 解析與修改邏輯
+- `UpdateRANSliceConfigs()` - 單次 Porch workflow 套用所有 intent group 的 slice config
+- `UpdateRANSliceConfig()` - 向後相容的單 slice wrapper
+- `mutateSliceConfigs()` - YAML 解析與 `spec.slicing` 批次修改邏輯
 - `PorchAPIClient` struct - 未來使用 K8s API 直接操作的骨架
 
 ### 5. Status 回報
@@ -155,13 +180,19 @@ spec:
 Controller 會更新 CR 的 status 欄位，包含：
 
 - 整體處理階段 (Pending/Processing/Applied/Failed)
+- 3GPP TS 28.312 fulfillment state (NOT_FULFILLED/PARTIALLY_FULFILLED/FULFILLED/DEGRADED)
+- `observedGeneration`，用於偵測 spec 變更並重新處理
 - 每個 intentGroup 的處理狀態
 - 轉譯後的參數值 (用於除錯和驗證)
+- Core/RAN 各 domain 的配置狀態
+- 已達成目標 (latency/bandwidth/resourceShare)
 - 最後 Reconcile 時間戳
 
 ```yaml
 status:
   phase: Applied
+  fulfillmentState: FULFILLED
+  observedGeneration: 1
   lastReconcileTime: "2024-03-31T05:30:00Z"
   conditions:
     - type: Ready
@@ -170,6 +201,8 @@ status:
   intentGroupStatuses:
     - id: embb
       phase: Applied
+      fulfillmentState: FULFILLED
+      message: "Intent successfully translated and applied to RAN domain"
       translatedParams:
         coreParams:
           fiveQI: 6
@@ -180,6 +213,17 @@ status:
           minPrbPolicyRatio: 0
           maxPrbPolicyRatio: 50
           priority: 10
+      achievedTargets:
+        bandwidth: achieved
+        latency: not_applicable
+        resourceShare: achieved
+      domainStatus:
+        coreDomain:
+          state: CONFIGURED
+          message: "UEs registered with 5QI=6"
+        ranDomain:
+          state: CONFIGURED
+          message: "Slice configured: SST=1, SD=66051, maxPRB=50"
 ```
 
 ## 專案結構
@@ -197,7 +241,7 @@ e2e-orchestrator/
 │   └── controller/
 │       ├── e2eqosintent_controller.go  # 主 Reconcile 邏輯
 │       ├── porch_client.go             # Nephio Porch 工作流程
-│       └── free5gc_client.go           # free5GC REST API 佔位
+│       └── free5gc_client.go           # free5GC WebConsole REST API client
 ├── config/
 │   ├── crd/
 │   │   └── bases/
@@ -211,9 +255,15 @@ e2e-orchestrator/
 │   └── samples/
 │       └── e2eqosintent_sample.yaml  # 範例 CR
 ├── hack/
+│   ├── benchmark-latency.sh
+│   ├── measure-latency.sh
 │   └── boilerplate.go.txt
+├── exp/                              # 實驗 log 與 latency 結果
 ├── Dockerfile
 ├── Makefile
+├── PROJECT_STATUS.md
+├── implementation.md
+├── intent-5qi-mapping.md
 ├── go.mod
 └── go.sum
 ```
@@ -228,6 +278,9 @@ make install
 
 # 本地執行 controller
 make run
+
+# 本地執行 controller，並啟用 free5GC WebConsole UE 註冊
+make run-webconsole
 
 # 套用範例 Intent
 make apply-sample
@@ -255,8 +308,13 @@ make deploy
 ./manager \
   --porch-namespace=default \
   --porch-published-package=regional.srsran-gnb.packagevariant-1 \
+  --free5gc-url=http://localhost:5000 \
+  --free5gc-username=admin \
+  --free5gc-password=free5gc \
   --leader-elect=false
 ```
+
+若 `--free5gc-url` 未設定，Controller 仍會執行 RAN domain Porch workflow，但 Core domain UE 註冊會被標記為 `SKIPPED`。若有設定 `--free5gc-url`，Controller 會對每個 intent group 的 `targetUEs` 執行 subscriber 建立/更新，並在 status 的 `domainStatus.coreDomain` 回報 `CONFIGURED` 或 `FAILED`。
 
 ## 相依性
 
@@ -265,22 +323,23 @@ make deploy
 - controller-runtime v0.18.5
 - Nephio Porch (用於 RAN domain 編排)
 - porchctl CLI (目前使用 CLI，未來可改為直接 API)
+- free5GC WebConsole (可選；設定 `--free5gc-url` 後啟用 Core domain UE 註冊)
 
 ## 待實作項目
 
-1. **free5GC WebConsole REST API 整合**
-   - 實作實際的 HTTP client 邏輯
-   - 處理認證和錯誤回應
-
-2. **Porch Go SDK 整合**
+1. **Porch Go SDK 整合**
    - 將 porchctl CLI 呼叫改為直接使用 Kubernetes API
    - 操作 PackageRevision/PackageRevisionResources CR
 
-3. **ConfigSync 同步等待**
+2. **ConfigSync 同步等待**
    - 等待 ConfigSync 將變更同步到 workload cluster
    - 驗證 ConfigMap 已更新
 
-4. **事件記錄**
+3. **真實 QoS 監控**
+   - 目前配置成功後會將 achievedTargets 標記為 achieved
+   - 後續可整合 Prometheus/監控系統驗證實際 latency/throughput
+
+4. **事件記錄與 Metrics**
    - 發送 Kubernetes Events 以便追蹤
    - 整合 Prometheus metrics
 
